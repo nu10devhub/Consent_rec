@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Camera, StopCircle } from 'lucide-react';
 import { RecordingStatus } from '../types';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 interface RecordingInterfaceProps {
   onStartRecording: () => void;
@@ -15,8 +16,18 @@ const RecordingInterface: React.FC<RecordingInterfaceProps> = ({
 }) => {
   const [timeLeft, setTimeLeft] = useState(30);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
   
+  const s3Client = new S3Client({
+    region: import.meta.env.VITE_AWS_REGION,
+    credentials: {
+      accessKeyId: import.meta.env.VITE_AWS_ACCESS_KEY_ID,
+      secretAccessKey: import.meta.env.VITE_AWS_SECRET_ACCESS_KEY,
+    },
+  });
+
   useEffect(() => {
     if (recordingStatus === 'recording') {
       startCamera();
@@ -36,15 +47,26 @@ const RecordingInterface: React.FC<RecordingInterfaceProps> = ({
 
   useEffect(() => {
     if (timeLeft === 0 && recordingStatus === 'recording') {
-      onStopRecording();
+      handleStopRecording();
     }
-  }, [timeLeft, recordingStatus, onStopRecording]);
+  }, [timeLeft, recordingStatus]);
   
   const startCamera = async () => {
     try {
       if (videoRef.current) {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         videoRef.current.srcObject = stream;
+        
+        mediaRecorderRef.current = new MediaRecorder(stream);
+        chunksRef.current = [];
+        
+        mediaRecorderRef.current.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            chunksRef.current.push(event.data);
+          }
+        };
+        
+        mediaRecorderRef.current.start();
       }
     } catch (error) {
       console.error('Error accessing camera:', error);
@@ -57,6 +79,37 @@ const RecordingInterface: React.FC<RecordingInterfaceProps> = ({
       const tracks = stream.getTracks();
       tracks.forEach(track => track.stop());
       videoRef.current.srcObject = null;
+    }
+  };
+
+  const uploadToS3 = async (blob: Blob) => {
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const fileName = `consent-recording-${timestamp}.webm`;
+
+      const command = new PutObjectCommand({
+        Bucket: import.meta.env.VITE_S3_BUCKET_NAME,
+        Key: fileName,
+        Body: blob,
+        ContentType: 'video/webm',
+      });
+
+      await s3Client.send(command);
+      console.log('Video uploaded successfully');
+    } catch (error) {
+      console.error('Error uploading to S3:', error);
+    }
+  };
+  
+  const handleStopRecording = async () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+      
+      mediaRecorderRef.current.onstop = async () => {
+        const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+        await uploadToS3(blob);
+        onStopRecording();
+      };
     }
   };
   
@@ -127,7 +180,7 @@ const RecordingInterface: React.FC<RecordingInterfaceProps> = ({
       
       {recordingStatus === 'recording' && (
         <button
-          onClick={onStopRecording}
+          onClick={handleStopRecording}
           className="w-full py-3 px-4 bg-red-600 hover:bg-red-700 text-white rounded-md font-medium flex items-center justify-center transition-colors"
         >
           <StopCircle className="mr-2" size={20} />
