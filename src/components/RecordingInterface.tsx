@@ -90,7 +90,7 @@ const RecordingInterface: React.FC<RecordingInterfaceProps> = ({
       const command = new PutObjectCommand({
         Bucket: import.meta.env.VITE_S3_BUCKET_NAME,
         Key: fileName,
-        Body: blob,
+        Body: blob.stream(),
         ContentType: 'video/webm',
       });
 
